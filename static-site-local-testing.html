@@ -1,0 +1,107 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Test a static website locally before you publish (Python + curl) | Saem Ali</title>
+<meta name="description" content="A tested, step-by-step guide to serving a static site on localhost with Python, checking MIME types and 404s with curl, and finding broken links with a 40-line script.">
+<link rel="stylesheet" href="style.css"></head><body><main>
+<p><a href="index.html">&larr; Writing samples</a></p>
+<h1>Test a static website locally before you publish: Python, curl and a 40-line link checker</h1>
+<p class="meta">By Saem Ali &middot; 10 November 2026 &middot; Tested on Debian GNU/Linux 13 (trixie), Python 3.13.5, curl 8.14.1 &middot; Drafted with AI assistance; every command was run and its output checked before publishing.</p>
+
+<h2>Introduction</h2>
+<p>You've finished a small website: a portfolio, a menu page for a restaurant, a landing page for a side project. Before you push it to GitHub Pages or a host, you want to know three things. Does every page load? Is the stylesheet served as CSS, not as a download? And is there a link somewhere that points at a page you forgot to create?</p>
+<p>Opening <code>index.html</code> straight from your file manager doesn't answer these questions, because the browser uses <code>file://</code> paths and skips the web server entirely. This guide serves the site the way a real host would, on your own machine only, and checks it with tools that are already installed on most Linux systems. Every command below was run while writing this guide, and the output shown is the real output.</p>
+
+<h2>What you need</h2>
+<ul><li>Linux or macOS with Python 3 (check with <code>python3 --version</code>).</li>
+<li><code>curl</code> (check with <code>curl --version</code>).</li>
+<li>A folder containing your site. The example uses <code>index.html</code>, <code>about.html</code> and <code>css/style.css</code>, and <code>index.html</code> links to a <code>contact.html</code> page that doesn't exist yet.</li></ul>
+
+<h2>Step 1: Serve the folder on localhost only</h2>
+<p>From inside the site folder, start Python's built-in web server and bind it to the loopback address:</p>
+<pre><code>cd mysite
+python3 -m http.server 8000 --bind 127.0.0.1</code></pre>
+<p>The <code>--bind 127.0.0.1</code> part matters. Without it, the server listens on every network interface, so anyone on the same Wi-Fi can browse your unfinished files. Confirm what it is listening on from a second terminal:</p>
+<pre><code>$ ss -ltn | grep 8000
+LISTEN 0      5          127.0.0.1:8000       0.0.0.0:*</code></pre>
+<p>Expected outcome: the local address column shows <code>127.0.0.1:8000</code>, not <code>0.0.0.0:8000</code>. Open <code>http://127.0.0.1:8000/</code> in your browser to see the site.</p>
+
+<h2>Step 2: Check status codes and content types with curl</h2>
+<p>A page can look fine in your browser and still be served with the wrong headers. Ask the server for headers only with <code>curl -I</code>:</p>
+<pre><code>$ curl -sI http://127.0.0.1:8000/ | head -4
+HTTP/1.0 200 OK
+Server: SimpleHTTP/0.6 Python/3.13.5
+Date: Tue, 10 Nov 2026 04:27:05 GMT
+Content-type: text/html
+
+$ curl -sI http://127.0.0.1:8000/css/style.css | grep -i -E "^HTTP|content-type"
+HTTP/1.0 200 OK
+Content-type: text/css</code></pre>
+<p>Expected outcome: <code>200 OK</code> for each file, <code>text/html</code> for pages and <code>text/css</code> for stylesheets. If a stylesheet comes back as <code>application/octet-stream</code> on your real host, browsers may refuse to apply it, so this is worth checking again after you deploy.</p>
+<p>Now check what a missing page returns. You only need the status code:</p>
+<pre><code>$ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/contact.html
+404</code></pre>
+<p>A real <code>404</code> is what you want for pages that don't exist. Some hosts return <code>200</code> with an error page instead, which hides broken links from search engines and from scripts like the one below.</p>
+
+<h2>Step 3: Find broken links automatically</h2>
+<p>Checking URLs one by one doesn't scale past a handful of pages. This script starts at your home page, follows every <code>href</code> and <code>src</code> on the same host, and reports anything that returns an error. It uses only Python's standard library, so there is nothing to install. Save it as <code>checklinks.py</code>:</p>
+<pre><code>import sys, urllib.request, urllib.error
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
+
+class Links(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.found = []
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        for key in (&quot;href&quot;, &quot;src&quot;):
+            if a.get(key): self.found.append(a[key])
+
+start = sys.argv[1]
+host = urlparse(start).netloc
+todo, seen, broken = [start], set(), []
+while todo:
+    url = todo.pop()
+    if url in seen: continue
+    seen.add(url)
+    try:
+        with urllib.request.urlopen(url) as r:
+            ctype = r.headers.get(&quot;Content-Type&quot;, &quot;&quot;)
+            body = r.read().decode(&quot;utf-8&quot;, &quot;replace&quot;)
+    except urllib.error.HTTPError as e:
+        broken.append((url, e.code)); continue
+    if &quot;text/html&quot; in ctype:
+        p = Links(); p.feed(body)
+        for link in p.found:
+            full = urljoin(url, link).split(&quot;#&quot;)[0]
+            if urlparse(full).netloc == host: todo.append(full)
+print(f&quot;Checked {len(seen)} URLs&quot;)
+for url, code in broken: print(f&quot;BROKEN {code} {url}&quot;)
+sys.exit(1 if broken else 0)
+</code></pre>
+<p>Run it against the local server:</p>
+<pre><code>$ python3 checklinks.py http://127.0.0.1:8000/
+Checked 5 URLs
+BROKEN 404 http://127.0.0.1:8000/contact.html</code></pre>
+<p>It found the forgotten contact page. The script exits with code 1 when something is broken, so you can use it in a deploy script or CI job to stop a broken site going live. After creating <code>contact.html</code> and running it again:</p>
+<pre><code>$ python3 checklinks.py http://127.0.0.1:8000/
+Checked 5 URLs
+$ echo $?
+0</code></pre>
+
+<h2>Step 4: Check the mobile layout</h2>
+<p>With the server still running, open your browser's developer tools (F12 in Chrome and Firefox), switch on the device toolbar (Ctrl+Shift+M), and try a narrow width such as 375 px. Look for text running off the screen and buttons that are too small to tap. If the layout ignores the narrow width, check that every page has <code>&lt;meta name="viewport" content="width=device-width,initial-scale=1"&gt;</code> in its <code>&lt;head&gt;</code>.</p>
+
+<h2>Step 5: Stop the server</h2>
+<p>Press Ctrl+C in the terminal where the server runs. If you started it in the background, stop it with <code>pkill -f "http.server 8000"</code>.</p>
+
+<h2>Troubleshooting</h2>
+<p><strong>"OSError: [Errno 98] Address already in use".</strong> Another server is still on port 8000, often one you started earlier and forgot. I hit this while writing this guide. Stop the old one with <code>pkill -f "http.server 8000"</code>, or start the new one on a different port such as 8001.</p>
+<p><strong>The page loads but has no styling.</strong> Check the stylesheet path with curl as in Step 2. Paths are case-sensitive on Linux hosts, so <code>CSS/Style.css</code> and <code>css/style.css</code> are different files.</p>
+
+<h2>Limits of this setup</h2>
+<p>Python's <code>http.server</code> is for local testing only. It has no HTTPS, no caching rules, no compression and no protection against heavy traffic, so never expose it to the internet. The link checker only follows links on the same host and doesn't run JavaScript, so links created by scripts won't be checked.</p>
+
+<h2>FAQ</h2>
+<p><strong>Why not just double-click index.html?</strong> Files opened via <code>file://</code> skip the web server, so you can't see status codes or content types, and some features such as <code>fetch()</code> behave differently.</p>
+<p><strong>Does this work on Windows?</strong> The Python commands do. Use <code>py -m http.server 8000 --bind 127.0.0.1</code>, and <code>curl.exe</code> ships with Windows 10 and 11. The <code>ss</code> check in Step 1 is Linux-only; use <code>netstat -an | findstr 8000</code> instead.</p>
+<p><strong>Can I check external links too?</strong> Yes, by removing the same-host check, but be polite: add a delay between requests and respect each site's rate limits.</p>
+</main></body></html>
