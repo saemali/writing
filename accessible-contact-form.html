@@ -1,0 +1,181 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Build an accessible HTML contact form with no JavaScript framework | Saem Ali</title>
+<meta name="description" content="A tested, step-by-step guide to an accessible contact form: real labels, hints, server-side validation, an error summary and a 40-line label checker in Python.">
+<link rel="stylesheet" href="style.css"></head><body><main>
+<p><a href="index.html">Writing samples</a></p>
+<h1>Build an accessible HTML contact form with no JavaScript framework</h1>
+<p><em>By Saem Ali, 12 November 2026. Drafted with AI assistance; every command below was run on Ubuntu with Python 3 and curl, and the output shown is the real output.</em></p>
+
+<p>A contact form is often the only way a small business hears from a customer. If a screen-reader user can't tell which box is for the email, or a keyboard user never learns why the form failed, that customer simply leaves. This guide builds a form that works for them with plain HTML and a tiny Python server, then tests it from the command line.</p>
+
+<h2>What you'll build</h2>
+<ul><li>A form where every field has a visible, programmatically linked label.</li>
+<li>Server-side validation that keeps the user's typing and explains each error next to its field.</li>
+<li>An error summary at the top with links that jump to each broken field.</li>
+<li>A 40-line Python checker that fails when a control has no label.</li></ul>
+
+<h2>Step 1: The form markup</h2>
+<p>Three rules do most of the work: every control has a <code>&lt;label for&gt;</code> that matches its <code>id</code>; hints are linked with <code>aria-describedby</code>; and <code>autocomplete</code> tokens let browsers and assistive tech fill in known details. <code>novalidate</code> turns off the browser's own bubbles so the server's clearer messages are the single source of truth.</p>
+<pre><code>&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width,initial-scale=1&quot;&gt;
+&lt;title&gt;Contact us&lt;/title&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;main&gt;
+&lt;h1&gt;Contact us&lt;/h1&gt;
+&lt;p id=&quot;req-note&quot;&gt;All fields are required.&lt;/p&gt;
+&lt;form action=&quot;/contact&quot; method=&quot;post&quot; aria-describedby=&quot;req-note&quot; novalidate&gt;
+  &lt;div&gt;
+    &lt;label for=&quot;name&quot;&gt;Your name&lt;/label&gt;
+    &lt;input id=&quot;name&quot; name=&quot;name&quot; type=&quot;text&quot; autocomplete=&quot;name&quot; required&gt;
+  &lt;/div&gt;
+  &lt;div&gt;
+    &lt;label for=&quot;email&quot;&gt;Email address&lt;/label&gt;
+    &lt;input id=&quot;email&quot; name=&quot;email&quot; type=&quot;email&quot; autocomplete=&quot;email&quot; required aria-describedby=&quot;email-hint&quot;&gt;
+    &lt;p id=&quot;email-hint&quot;&gt;We only use this to reply to you.&lt;/p&gt;
+  &lt;/div&gt;
+  &lt;div&gt;
+    &lt;label for=&quot;message&quot;&gt;Message&lt;/label&gt;
+    &lt;textarea id=&quot;message&quot; name=&quot;message&quot; rows=&quot;5&quot; required&gt;&lt;/textarea&gt;
+  &lt;/div&gt;
+  &lt;button type=&quot;submit&quot;&gt;Send message&lt;/button&gt;
+&lt;/form&gt;
+&lt;/main&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<h2>Step 2: Validate on the server and keep what the user typed</h2>
+<p>Client-side checks are a nice extra, but the server must validate anyway, and a server-rendered error page works with JavaScript off. On failure the handler returns HTTP 422, prefixes the page title with “Error:” (the first thing a screen reader announces), marks each bad field with <code>aria-invalid="true"</code>, and links the field to its message with <code>aria-describedby</code>. Everything echoed back goes through <code>html.escape</code>.</p>
+<pre><code>import html, re
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import parse_qs
+
+EMAIL = re.compile(r&quot;^[^@\s]+@[^@\s]+\.[^@\s]+$&quot;)
+
+def validate(f):
+    errors = {}
+    if not f.get(&quot;name&quot;, &quot;&quot;).strip():
+        errors[&quot;name&quot;] = &quot;Enter your name.&quot;
+    if not EMAIL.match(f.get(&quot;email&quot;, &quot;&quot;).strip()):
+        errors[&quot;email&quot;] = &quot;Enter an email address like name@example.com.&quot;
+    if len(f.get(&quot;message&quot;, &quot;&quot;).strip()) &lt; 10:
+        errors[&quot;message&quot;] = &quot;Write a message of at least 10 characters.&quot;
+    return errors
+
+def page(f, errors):
+    e = html.escape
+    def field(fid, label, tag=&quot;input&quot;, typ=&quot;text&quot;):
+        err = errors.get(fid)
+        val = e(f.get(fid, &quot;&quot;))
+        attrs = f&#x27;id=&quot;{fid}&quot; name=&quot;{fid}&quot; required&#x27;
+        if err:
+            attrs += f&#x27; aria-invalid=&quot;true&quot; aria-describedby=&quot;{fid}-error&quot;&#x27;
+        ctrl = (f&#x27;&lt;textarea {attrs} rows=&quot;5&quot;&gt;{val}&lt;/textarea&gt;&#x27; if tag == &quot;textarea&quot;
+                else f&#x27;&lt;input {attrs} type=&quot;{typ}&quot; value=&quot;{val}&quot;&gt;&#x27;)
+        msg = f&#x27;&lt;p id=&quot;{fid}-error&quot; class=&quot;error&quot;&gt;{e(err)}&lt;/p&gt;&#x27; if err else &quot;&quot;
+        return f&#x27;&lt;div&gt;&lt;label for=&quot;{fid}&quot;&gt;{label}&lt;/label&gt;{msg}{ctrl}&lt;/div&gt;&#x27;
+    summary = &quot;&quot;
+    if errors:
+        items = &quot;&quot;.join(f&#x27;&lt;li&gt;&lt;a href=&quot;#{k}&quot;&gt;{e(v)}&lt;/a&gt;&lt;/li&gt;&#x27; for k, v in errors.items())
+        summary = (f&#x27;&lt;div role=&quot;alert&quot; tabindex=&quot;-1&quot; id=&quot;error-summary&quot;&gt;&#x27;
+                   f&#x27;&lt;h2&gt;There is a problem&lt;/h2&gt;&lt;ul&gt;{items}&lt;/ul&gt;&lt;/div&gt;&#x27;)
+    title = (&quot;Error: &quot; if errors else &quot;&quot;) + &quot;Contact us&quot;
+    return (f&#x27;&lt;!doctype html&gt;&lt;html lang=&quot;en&quot;&gt;&lt;head&gt;&lt;meta charset=&quot;utf-8&quot;&gt;&lt;title&gt;{title}&lt;/title&gt;&lt;/head&gt;&#x27;
+            f&#x27;&lt;body&gt;&lt;main&gt;&lt;h1&gt;Contact us&lt;/h1&gt;{summary}&lt;form action=&quot;/contact&quot; method=&quot;post&quot; novalidate&gt;&#x27;
+            + field(&quot;name&quot;, &quot;Your name&quot;) + field(&quot;email&quot;, &quot;Email address&quot;, typ=&quot;email&quot;)
+            + field(&quot;message&quot;, &quot;Message&quot;, tag=&quot;textarea&quot;)
+            + &#x27;&lt;button type=&quot;submit&quot;&gt;Send message&lt;/button&gt;&lt;/form&gt;&lt;/main&gt;&lt;/body&gt;&lt;/html&gt;&#x27;)
+
+class H(SimpleHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get(&quot;Content-Length&quot;, 0))
+        f = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode(), keep_blank_values=True).items()}
+        errors = validate(f)
+        if errors:
+            body, code = page(f, errors), 422
+        else:
+            body, code = &#x27;&lt;!doctype html&gt;&lt;html lang=&quot;en&quot;&gt;&lt;head&gt;&lt;meta charset=&quot;utf-8&quot;&gt;&lt;title&gt;Message sent&lt;/title&gt;&lt;/head&gt;&lt;body&gt;&lt;main&gt;&lt;h1&gt;Thanks, your message was sent&lt;/h1&gt;&lt;/main&gt;&lt;/body&gt;&lt;/html&gt;&#x27;, 200
+        data = body.encode()
+        self.send_response(code)
+        self.send_header(&quot;Content-Type&quot;, &quot;text/html; charset=utf-8&quot;)
+        self.send_header(&quot;Content-Length&quot;, str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+HTTPServer((&quot;127.0.0.1&quot;, 8765), H).serve_forever()
+</code></pre>
+<p>Start it from the folder that holds <code>form.html</code>:</p>
+<pre><code>python3 server.py</code></pre>
+
+<h2>Step 3: Test the three paths with curl</h2>
+<p>The page loads:</p>
+<pre><code>$ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8765/form.html
+200</code></pre>
+<p>A bad submission (empty name, an email with no domain ending, a two-letter message) returns 422 and an error page that keeps the user's input:</p>
+<pre><code>$ curl -s -w "\nHTTP %{http_code}\n" -d "name=&amp;email=asha%40example&amp;message=hi" http://127.0.0.1:8765/contact
+&lt;!doctype html&gt;&lt;html lang=&quot;en&quot;&gt;&lt;head&gt;&lt;meta charset=&quot;utf-8&quot;&gt;&lt;title&gt;Error: Contact us&lt;/title&gt;&lt;/head&gt;&lt;body&gt;&lt;main&gt;&lt;h1&gt;Contact us&lt;/h1&gt;&lt;div role=&quot;alert&quot; tabindex=&quot;-1&quot; id=&quot;error-summary&quot;&gt;&lt;h2&gt;There is a problem&lt;/h2&gt;&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;#name&quot;&gt;Enter your name.&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;#email&quot;&gt;Enter an email address like name@example.com.&lt;/a&gt;&lt;/li&gt;&lt;li&gt;&lt;a href=&quot;#message&quot;&gt;Write a message of at least 10 characters.&lt;/a&gt;&lt;/li&gt;&lt;/ul&gt;&lt;/div&gt;&lt;form action=&quot;/contact&quot; method=&quot;post&quot; novalidate&gt;&lt;div&gt;&lt;label for=&quot;name&quot;&gt;Your name&lt;/label&gt;&lt;p id=&quot;name-error&quot; class=&quot;error&quot;&gt;Enter your name.&lt;/p&gt;&lt;input id=&quot;name&quot; name=&quot;name&quot; required aria-invalid=&quot;true&quot; aria-describedby=&quot;name-error&quot; type=&quot;text&quot; value=&quot;&quot;&gt;&lt;/div&gt;&lt;div&gt;&lt;label for=&quot;email&quot;&gt;Email address&lt;/label&gt;&lt;p id=&quot;email-error&quot; class=&quot;error&quot;&gt;Enter an email address like name@example.com.&lt;/p&gt;&lt;input id=&quot;email&quot; name=&quot;email&quot; required aria-invalid=&quot;true&quot; aria-describedby=&quot;email-error&quot; type=&quot;email&quot; value=&quot;asha@example&quot;&gt;&lt;/div&gt;&lt;div&gt;&lt;label for=&quot;message&quot;&gt;Message&lt;/label&gt;&lt;p id=&quot;message-error&quot; class=&quot;error&quot;&gt;Write a message of at least 10 characters.&lt;/p&gt;&lt;textarea id=&quot;message&quot; name=&quot;message&quot; required aria-invalid=&quot;true&quot; aria-describedby=&quot;message-error&quot; rows=&quot;5&quot;&gt;hi&lt;/textarea&gt;&lt;/div&gt;&lt;button type=&quot;submit&quot;&gt;Send message&lt;/button&gt;&lt;/form&gt;&lt;/main&gt;&lt;/body&gt;&lt;/html&gt;
+HTTP 422</code></pre>
+<p>A good submission returns 200:</p>
+<pre><code>$ curl -s -w "\nHTTP %{http_code}\n" -d "name=Asha&amp;email=asha%40example.com&amp;message=Please+call+me+back" http://127.0.0.1:8765/contact
+&lt;!doctype html&gt;&lt;html lang=&quot;en&quot;&gt;&lt;head&gt;&lt;meta charset=&quot;utf-8&quot;&gt;&lt;title&gt;Message sent&lt;/title&gt;&lt;/head&gt;&lt;body&gt;&lt;main&gt;&lt;h1&gt;Thanks, your message was sent&lt;/h1&gt;&lt;/main&gt;&lt;/body&gt;&lt;/html&gt;
+HTTP 200</code></pre>
+<p>And a script tag in the name field comes back escaped, not executed:</p>
+<pre><code>$ curl -s -d 'name=&lt;script&gt;x&lt;/script&gt;&amp;email=a&amp;message=' http://127.0.0.1:8765/contact | grep -o 'value="[^"]*script[^"]*"'
+value="&amp;lt;script&amp;gt;x&amp;lt;/script&amp;gt;"</code></pre>
+
+<h2>Step 4: Catch missing labels automatically</h2>
+<p>Labels are the bug that creeps back in when someone edits the form later. This checker uses only Python's standard library and exits non-zero on a problem, so it can run in CI.</p>
+<pre><code>&quot;&quot;&quot;Check that every form control has a matching &lt;label for&gt; and every
+aria-describedby id exists. Usage: python3 checkform.py page.html&quot;&quot;&quot;
+import sys
+from html.parser import HTMLParser
+
+class P(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids, self.label_for, self.controls, self.described = set(), set(), [], []
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if &quot;id&quot; in a:
+            self.ids.add(a[&quot;id&quot;])
+        if tag == &quot;label&quot; and &quot;for&quot; in a:
+            self.label_for.add(a[&quot;for&quot;])
+        if tag in (&quot;input&quot;, &quot;textarea&quot;, &quot;select&quot;) and a.get(&quot;type&quot;) not in (&quot;hidden&quot;, &quot;submit&quot;):
+            self.controls.append(a.get(&quot;id&quot;) or a.get(&quot;name&quot;))
+        for ref in (a.get(&quot;aria-describedby&quot;) or &quot;&quot;).split():
+            self.described.append(ref)
+
+p = P()
+p.feed(open(sys.argv[1], encoding=&quot;utf-8&quot;).read())
+problems = [f&quot;no label for control &#x27;{c}&#x27;&quot; for c in p.controls if c not in p.label_for]
+problems += [f&quot;aria-describedby points to missing id &#x27;{r}&#x27;&quot; for r in p.described if r not in p.ids]
+for x in problems:
+    print(&quot;FAIL:&quot;, x)
+print(f&quot;{len(p.controls)} controls checked, {len(problems)} problems&quot;)
+sys.exit(1 if problems else 0)
+</code></pre>
+<pre><code>$ python3 checkform.py form.html
+3 controls checked, 0 problems
+$ python3 checkform.py bad_post.html
+3 controls checked, 0 problems</code></pre>
+<p>To prove it catches a real mistake, delete the name label and run it again:</p>
+<pre><code>$ sed 's|&lt;label for="name"&gt;Your name&lt;/label&gt;||' form.html &gt; bad.html
+$ python3 checkform.py bad.html; echo "exit $?"
+FAIL: no label for control 'name'
+3 controls checked, 1 problems
+exit 1</code></pre>
+
+<h2>What this does not cover</h2>
+<p>The checker is a quick guard, not an audit. Before launch, also tab through the form with the keyboard only, zoom to 200%, and try it with a screen reader such as NVDA or VoiceOver. A real site also needs CSRF protection, rate limiting and somewhere to deliver the message (email or a database); those are left out to keep the example short.</p>
+
+<h2>Checklist</h2>
+<ul><li>Every input, textarea and select has a matching <code>&lt;label for&gt;</code>.</li>
+<li>Hints and errors are linked with <code>aria-describedby</code>.</li>
+<li>Errors appear in a summary with links and next to each field, in words that say how to fix them.</li>
+<li>The page title starts with “Error:” when validation fails.</li>
+<li>User input is kept and escaped.</li></ul>
+</main></body></html>
